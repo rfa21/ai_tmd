@@ -628,12 +628,7 @@ def clean_text_for_tts(text):
     )
     text = emoji_pattern.sub('', text)
     
-    # 3. 키캡 이모지 제거 (1️⃣, 2️⃣, 3️⃣, 4️⃣ 등)
-    # 키캡은 숫자/문자 + Variation Selector(U+FE0F) + Combining Enclosing Keycap(U+20E3)으로 구성
-    keycap_pattern = re.compile(r'[0-9#*]\uFE0F?\u20E3', flags=re.UNICODE)
-    text = keycap_pattern.sub('', text)
-    
-    # 4. 특수 이모티콘 문자 제거
+    # 3. 특수 이모티콘 문자 제거
     text = text.replace('✅', '')
     text = text.replace('⭐', '')
     text = text.replace('※', '')
@@ -1259,58 +1254,25 @@ if not st.session_state.conversation_complete:
 else:
     st.success("✅ 정보 수집이 완료되었습니다!")
     
-    # 진단 결과 생성 (미리 계산)
-    diagnoses = compute_diagnoses_for_all_symptoms(st.session_state.patient_data)
-    
-    # 🔥 완료된 진단 데이터를 영구 보관용 컬렉션에 저장 (중복 방지)
-    if db is not None and 'diagnosis_saved' not in st.session_state:
+    # 🔥 완료된 진단 데이터를 영구 보관용 컬렉션에 저장
+    if db is not None:
         try:
-            # 현재 세션의 updated_at 시각을 가져와서 ID로 사용 (중복 방지)
-            current_session_ref = db.collection('tmd_sessions').document(USER_ID)
-            current_session_doc = current_session_ref.get()
+            # 완료 시각을 ID로 사용
+            completed_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            completed_doc_id = f"{USER_ID}_{completed_id}"
             
-            if current_session_doc.exists:
-                session_data = current_session_doc.to_dict()
-                updated_at = session_data.get('updated_at')
-                
-                # updated_at을 문자열로 변환하여 ID 생성
-                if updated_at:
-                    if isinstance(updated_at, datetime.datetime):
-                        completed_id = updated_at.strftime("%Y%m%d_%H%M%S")
-                    else:
-                        # Firestore Timestamp 객체인 경우
-                        completed_id = updated_at.strftime("%Y%m%d_%H%M%S") if hasattr(updated_at, 'strftime') else datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                else:
-                    completed_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                
-                completed_doc_id = f"{USER_ID}_{completed_id}"
-                
-                # 이미 저장된 문서인지 확인
-                existing_doc = db.collection('completed_diagnoses').document(completed_doc_id).get()
-                
-                if not existing_doc.exists:
-                    # 진단 결과를 patient_data에 추가
-                    diagnosis_list = diagnoses if diagnoses else ["진단 없음"]
-                    
-                    completed_data = {
-                        'user_id': USER_ID,
-                        'messages': st.session_state.messages,
-                        'patient_data': st.session_state.patient_data,
-                        'diagnoses': diagnosis_list,  # 진단 결과 리스트 추가
-                        'diagnosis_result': ", ".join(diagnosis_list),  # 진단 결과 문자열
-                        'completed_at': updated_at if updated_at else datetime.datetime.now(),
-                        'completed_timestamp': (updated_at.isoformat() if isinstance(updated_at, datetime.datetime) else datetime.datetime.now().isoformat()),
-                        'saved_at': datetime.datetime.now()  # 실제 저장 시각
-                    }
-                    
-                    # 'completed_diagnoses' 컬렉션에 저장
-                    db.collection('completed_diagnoses').document(completed_doc_id).set(completed_data)
-                    st.session_state.diagnosis_saved = True  # 저장 완료 플래그
-                    print(f"✅ 완료된 진단 저장 완료: {completed_doc_id}")
-                    print(f"   - 진단 결과: {diagnosis_list}")
-                else:
-                    st.session_state.diagnosis_saved = True
-                    print(f"ℹ️ 이미 저장된 진단: {completed_doc_id}")
+            completed_data = {
+                'user_id': USER_ID,
+                'messages': st.session_state.messages,
+                'patient_data': st.session_state.patient_data,
+                'completed_at': datetime.datetime.now(),
+                'completed_timestamp': datetime.datetime.now().isoformat()
+            }
+            
+            # 'completed_diagnoses' 컬렉션에 저장
+            db.collection('completed_diagnoses').document(completed_doc_id).set(completed_data)
+            print(f"✅ 완료된 진단 저장 완료: {completed_doc_id}")
+            
         except Exception as e:
             print(f"⚠️ 완료된 진단 저장 실패: {e}")
     
@@ -1363,8 +1325,6 @@ else:
                 st.session_state.conversation_complete = False
                 if 'uploaded_images' in st.session_state:
                     del st.session_state.uploaded_images
-                if 'diagnosis_saved' in st.session_state:
-                    del st.session_state.diagnosis_saved
                 st.rerun()
     
     with col3:
