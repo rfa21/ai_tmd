@@ -552,8 +552,9 @@ def validate_api_key(api_key):
     except Exception as e:
         return False, str(e)
 
+@auto_save_decorator
 def call_claude(user_message):
-    """Claude API를 호출하여 응답 받기"""
+    """Claude API를 호출하여 응답 받기 (자동 저장 포함)"""
     try:
         if not st.session_state.anthropic_client:
             return "⚠️ API 클라이언트가 초기화되지 않았습니다.", False, ""
@@ -622,10 +623,6 @@ def call_claude(user_message):
             # 완료 여부 업데이트
             if is_complete:
                 st.session_state.conversation_complete = True
-            
-            # 🔥 Firebase에 즉시 저장
-            save_result = save_to_firestore()
-            print(f"💾 Firestore 저장 결과: {save_result}")
             
             return message, True, progress
             
@@ -911,36 +908,10 @@ if not st.session_state.conversation_complete:
                     "content": response,
                     "display_content": response
                 })
-                
-                # 🔥 Firebase에 즉시 저장
-                save_to_firestore()
-                print("💾 Assistant 메시지 추가 후 Firestore 저장 완료")
         
         st.rerun()
 else:
     st.success("✅ 정보 수집이 완료되었습니다!")
-    
-    # 🔥 완료된 진단 데이터를 영구 보관용 컬렉션에 저장
-    if db is not None:
-        try:
-            # 완료 시각을 ID로 사용
-            completed_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            completed_doc_id = f"{USER_ID}_{completed_id}"
-            
-            completed_data = {
-                'user_id': USER_ID,
-                'messages': st.session_state.messages,
-                'patient_data': st.session_state.patient_data,
-                'completed_at': datetime.datetime.now(),
-                'completed_timestamp': datetime.datetime.now().isoformat()
-            }
-            
-            # 'completed_diagnoses' 컬렉션에 저장
-            db.collection('completed_diagnoses').document(completed_doc_id).set(completed_data)
-            print(f"✅ 완료된 진단 저장 완료: {completed_doc_id}")
-            
-        except Exception as e:
-            print(f"⚠️ 완료된 진단 저장 실패: {e}")
     
     # 진단 결과 생성 및 표시
     st.markdown("---")

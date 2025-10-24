@@ -39,20 +39,57 @@ def init_firebase():
 db = init_firebase()
 
 # ===== 쿠키 매니저 초기화 =====
-cookies = EncryptedCookieManager(
-    prefix="tmd_chatbot_",
-    password=st.secrets.get("cookie_password", "tjdqndhktjdwkdhktjdfuddmldlfmadmfhdkaps")
-)
+def init_cookies_safely():
+    """안전하게 쿠키 초기화"""
+    try:
+        cookies = EncryptedCookieManager(
+            prefix="tmd_chatbot_",
+            password=st.secrets.get("cookie_password", "default-password-change-me")
+        )
+        
+        if not cookies.ready():
+            return None, None
+        
+        return cookies, None
+    except Exception as e:
+        return None, str(e)
 
-if not cookies.ready():
+def get_or_create_user_id(cookies):
+    """사용자 ID 가져오기 또는 생성"""
+    if cookies is None:
+        # 쿠키 사용 불가 시 세션 상태 사용
+        if 'temp_user_id' not in st.session_state:
+            st.session_state.temp_user_id = f"temp_{uuid.uuid4()}"
+        return st.session_state.temp_user_id
+    
+    try:
+        user_id = cookies.get('user_id')
+        
+        if user_id is None or user_id == '':
+            user_id = str(uuid.uuid4())
+            cookies['user_id'] = user_id
+            cookies.save()
+        
+        return user_id
+    except Exception as e:
+        st.warning(f"쿠키 오류: {e}")
+        if 'temp_user_id' not in st.session_state:
+            st.session_state.temp_user_id = f"temp_{uuid.uuid4()}"
+        return st.session_state.temp_user_id
+
+# 쿠키 초기화
+cookies, cookie_error = init_cookies_safely()
+
+if cookies is None and cookie_error:
+    st.warning(f"⚠️ 쿠키 초기화 실패: {cookie_error}")
+    st.info("💡 임시 세션을 사용합니다. Firebase는 정상 작동합니다.")
+
+if cookies and not cookies.ready():
+    st.info("🔄 세션을 초기화하는 중입니다...")
     st.stop()
 
-# 사용자 ID 관리
-if 'user_id' not in cookies:
-    cookies['user_id'] = str(uuid.uuid4())
-    cookies.save()
-
-USER_ID = cookies['user_id']
+# 사용자 ID 가져오기
+USER_ID = get_or_create_user_id(cookies)
 
 # ===== Firestore 함수들 =====
 def save_to_firestore():
@@ -552,8 +589,9 @@ def validate_api_key(api_key):
     except Exception as e:
         return False, str(e)
 
+@auto_save_decorator
 def call_claude(user_message):
-    """Claude API를 호출하여 응답 받기"""
+    """Claude API를 호출하여 응답 받기 (자동 저장 포함)"""
     try:
         if not st.session_state.anthropic_client:
             return "⚠️ API 클라이언트가 초기화되지 않았습니다.", False, ""
@@ -588,12 +626,6 @@ def call_claude(user_message):
         
         assistant_message = response.content[0].text
         
-        # 디버그: 원본 응답 출력
-        print("\n" + "=" * 60)
-        print("🔍 Claude 원본 응답:")
-        print(assistant_message[:500])  # 처음 500자만
-        print("=" * 60 + "\n")
-        
         # JSON 파싱 시도
         try:
             if "```json" in assistant_message:
@@ -610,22 +642,10 @@ def call_claude(user_message):
             # 수집된 데이터 저장
             if collected_data:
                 st.session_state.patient_data.update(collected_data)
-                # 디버그: 수집된 데이터 확인 (콘솔)
-                print("=" * 60)
-                print(f"🔍 DEBUG - collected_data: {collected_data}")
-                print(f"🔍 DEBUG - patient_data: {st.session_state.patient_data}")
-                print("=" * 60)
-            else:
-                print("⚠️ DEBUG - collected_data가 비어있음!")
-                print(f"   parsed_response: {parsed_response}")
             
             # 완료 여부 업데이트
             if is_complete:
                 st.session_state.conversation_complete = True
-            
-            # 🔥 Firebase에 즉시 저장
-            save_result = save_to_firestore()
-            print(f"💾 Firestore 저장 결과: {save_result}")
             
             return message, True, progress
             
@@ -754,7 +774,24 @@ with st.sidebar:
     
     # 세션 정보 표시
     st.header("🔐 세션 정보")
-    st.caption(f"세션 ID: `{USER_ID[:8]}...`")
+    if USER_ID and len(USER_ID) >= 8:
+        st.caption(f"세션 ID: `{USER_ID[:8]}...`")
+    else:
+        st.caption(f"세션 ID: `{USER_ID}`")
+    
+    # 쿠키 상태 표시 (디버그용)
+    if USER_ID and USER_ID.startswith("temp_"):
+        st.warning("⚠️ 임시 세션 사용 중 - 쿠키가 비활성화되었을 수 있습니다")
+        with st.expander("쿠키 문제 해결"):
+            st.markdown("""
+            ### 쿠키가 작동하지 않는 경우:
+            1. 브라우저 설정에서 쿠키 허용 확인
+            2. 시크릿/프라이빗 모드가 아닌지 확인
+            3. 브라우저 새로고침 (Ctrl+F5)
+            4. 다른 브라우저에서 시도
+            
+            임시 세션도 Firebase에 저장되므로 기능은 정상 작동합니다.
+            """)
     
     # Firebase 연결 상태
     if db:
@@ -911,36 +948,10 @@ if not st.session_state.conversation_complete:
                     "content": response,
                     "display_content": response
                 })
-                
-                # 🔥 Firebase에 즉시 저장
-                save_to_firestore()
-                print("💾 Assistant 메시지 추가 후 Firestore 저장 완료")
         
         st.rerun()
 else:
     st.success("✅ 정보 수집이 완료되었습니다!")
-    
-    # 🔥 완료된 진단 데이터를 영구 보관용 컬렉션에 저장
-    if db is not None:
-        try:
-            # 완료 시각을 ID로 사용
-            completed_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            completed_doc_id = f"{USER_ID}_{completed_id}"
-            
-            completed_data = {
-                'user_id': USER_ID,
-                'messages': st.session_state.messages,
-                'patient_data': st.session_state.patient_data,
-                'completed_at': datetime.datetime.now(),
-                'completed_timestamp': datetime.datetime.now().isoformat()
-            }
-            
-            # 'completed_diagnoses' 컬렉션에 저장
-            db.collection('completed_diagnoses').document(completed_doc_id).set(completed_data)
-            print(f"✅ 완료된 진단 저장 완료: {completed_doc_id}")
-            
-        except Exception as e:
-            print(f"⚠️ 완료된 진단 저장 실패: {e}")
     
     # 진단 결과 생성 및 표시
     st.markdown("---")

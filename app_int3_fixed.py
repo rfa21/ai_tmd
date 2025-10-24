@@ -920,28 +920,6 @@ if not st.session_state.conversation_complete:
 else:
     st.success("✅ 정보 수집이 완료되었습니다!")
     
-    # 🔥 완료된 진단 데이터를 영구 보관용 컬렉션에 저장
-    if db is not None:
-        try:
-            # 완료 시각을 ID로 사용
-            completed_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            completed_doc_id = f"{USER_ID}_{completed_id}"
-            
-            completed_data = {
-                'user_id': USER_ID,
-                'messages': st.session_state.messages,
-                'patient_data': st.session_state.patient_data,
-                'completed_at': datetime.datetime.now(),
-                'completed_timestamp': datetime.datetime.now().isoformat()
-            }
-            
-            # 'completed_diagnoses' 컬렉션에 저장
-            db.collection('completed_diagnoses').document(completed_doc_id).set(completed_data)
-            print(f"✅ 완료된 진단 저장 완료: {completed_doc_id}")
-            
-        except Exception as e:
-            print(f"⚠️ 완료된 진단 저장 실패: {e}")
-    
     # 진단 결과 생성 및 표시
     st.markdown("---")
     

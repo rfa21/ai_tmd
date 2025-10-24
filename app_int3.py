@@ -41,7 +41,7 @@ db = init_firebase()
 # ===== 쿠키 매니저 초기화 =====
 cookies = EncryptedCookieManager(
     prefix="tmd_chatbot_",
-    password=st.secrets.get("cookie_password", "default-password-change-me")
+    password=st.secrets.get("cookie_password", "tjdqndhktjdwkdhktjdfuddmldlfmadmfhdkaps")
 )
 
 if not cookies.ready():
