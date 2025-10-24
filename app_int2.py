@@ -2,7 +2,6 @@ import streamlit as st
 from streamlit_cookies_manager import EncryptedCookieManager
 import firebase_admin
 from firebase_admin import credentials, firestore
-import uuid
 from anthropic import Anthropic
 import json
 import datetime
@@ -10,29 +9,7 @@ from io import BytesIO
 import fitz
 import os
 import textwrap
-
-# Firebase 초기화 (한 번만 실행)
-if not firebase_admin._apps:
-    cred = credentials.Certificate(dict(st.secrets["firebase"]))
-    firebase_admin.initialize_app(cred)
-
-db = firestore.client()
-
-# 쿠키 매니저 초기화
-cookies = EncryptedCookieManager(
-    prefix="chatbot_",
-    password=st.secrets["cookie_password"]
-)
-
-if not cookies.ready():
-    st.stop()
-
-# 사용자 ID 관리
-if 'user_id' not in cookies:
-    cookies['user_id'] = str(uuid.uuid4())
-    cookies.save()
-
-USER_ID = cookies['user_id']
+import uuid
 
 # 페이지 설정
 st.set_page_config(
@@ -45,21 +22,134 @@ st.set_page_config(
 script_dir = os.path.dirname(os.path.abspath(__file__))
 FONT_FILE = os.path.join(script_dir, "NanumGothic.ttf")
 
-# 세션 상태 초기화
-if 'messages' not in st.session_state:
-    st.session_state.messages = []
+# ===== Firebase 초기화 =====
+@st.cache_resource
+def init_firebase():
+    """Firebase 초기화 (한 번만 실행)"""
+    if not firebase_admin._apps:
+        try:
+            cred = credentials.Certificate(dict(st.secrets["firebase"]))
+            firebase_admin.initialize_app(cred)
+        except Exception as e:
+            st.error(f"Firebase 초기화 실패: {e}")
+            return None
+    return firestore.client()
+
+# Firebase 클라이언트 초기화
+db = init_firebase()
+
+# ===== 쿠키 매니저 초기화 =====
+cookies = EncryptedCookieManager(
+    prefix="tmd_chatbot_",
+    password=st.secrets.get("cookie_password", "default-password-change-me")
+)
+
+if not cookies.ready():
+    st.stop()
+
+# 사용자 ID 관리
+if 'user_id' not in cookies:
+    cookies['user_id'] = str(uuid.uuid4())
+    cookies.save()
+
+USER_ID = cookies['user_id']
+
+# ===== Firestore 함수들 =====
+def save_to_firestore():
+    """현재 세션 데이터를 Firestore에 저장"""
+    if db is None:
+        return False
     
-if 'patient_data' not in st.session_state:
-    st.session_state.patient_data = {}
+    try:
+        doc_ref = db.collection('tmd_sessions').document(USER_ID)
+        doc_ref.set({
+            'messages': st.session_state.messages,
+            'patient_data': st.session_state.patient_data,
+            'conversation_complete': st.session_state.conversation_complete,
+            'updated_at': datetime.datetime.now(),
+            'last_activity': datetime.datetime.now().isoformat()
+        })
+        return True
+    except Exception as e:
+        st.error(f"저장 실패: {e}")
+        return False
 
-if 'conversation_complete' not in st.session_state:
-    st.session_state.conversation_complete = False
+def load_from_firestore():
+    """Firestore에서 세션 데이터 불러오기"""
+    if db is None:
+        return None
+    
+    try:
+        doc_ref = db.collection('tmd_sessions').document(USER_ID)
+        doc = doc_ref.get()
+        if doc.exists:
+            return doc.to_dict()
+    except Exception as e:
+        st.error(f"불러오기 실패: {e}")
+    return None
 
-if 'api_key_validated' not in st.session_state:
-    st.session_state.api_key_validated = False
+def delete_from_firestore():
+    """Firestore에서 세션 데이터 삭제"""
+    if db is None:
+        return False
+    
+    try:
+        db.collection('tmd_sessions').document(USER_ID).delete()
+        return True
+    except Exception as e:
+        st.error(f"삭제 실패: {e}")
+        return False
 
-if 'anthropic_client' not in st.session_state:
-    st.session_state.anthropic_client = None
+def auto_save_decorator(func):
+    """자동 저장 데코레이터"""
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        save_to_firestore()
+        return result
+    return wrapper
+
+# ===== 세션 상태 초기화 (Firestore에서 복원) =====
+def initialize_session_state():
+    """세션 상태를 Firestore에서 복원하거나 초기화"""
+    
+    # Firestore에서 데이터 불러오기 시도
+    saved_data = load_from_firestore()
+    
+    if saved_data:
+        # 저장된 데이터가 있으면 복원
+        st.session_state.messages = saved_data.get('messages', [])
+        st.session_state.patient_data = saved_data.get('patient_data', {})
+        st.session_state.conversation_complete = saved_data.get('conversation_complete', False)
+        
+        # 마지막 활동 시간 확인
+        last_activity = saved_data.get('last_activity')
+        if last_activity:
+            try:
+                last_time = datetime.datetime.fromisoformat(last_activity)
+                time_diff = datetime.datetime.now() - last_time
+                
+                # 24시간 이상 지났으면 알림
+                if time_diff.total_seconds() > 86400:
+                    st.info(f"💡 마지막 활동: {time_diff.days}일 전 ({last_time.strftime('%Y-%m-%d %H:%M')})")
+            except:
+                pass
+    else:
+        # 새 세션 시작
+        if 'messages' not in st.session_state:
+            st.session_state.messages = []
+        if 'patient_data' not in st.session_state:
+            st.session_state.patient_data = {}
+        if 'conversation_complete' not in st.session_state:
+            st.session_state.conversation_complete = False
+    
+    # API 관련 상태
+    if 'api_key_validated' not in st.session_state:
+        st.session_state.api_key_validated = False
+    if 'anthropic_client' not in st.session_state:
+        st.session_state.anthropic_client = None
+
+# 세션 초기화 실행
+initialize_session_state()
 
 # ===== 기존 진단 로직 함수 (app.py에서 가져옴) =====
 def compute_diagnoses_for_all_symptoms(state):
@@ -167,7 +257,6 @@ def generate_filled_pdf():
     doc = fitz.open(template_path)
 
     # patient_data를 session_state 형식으로 변환
-    # (기존 코드와의 호환성을 위해)
     data = st.session_state.patient_data.copy()
     
     # neck_shoulder_symptoms 변환 (dict일 때만)
@@ -286,10 +375,8 @@ def generate_filled_pdf():
     uploaded_images = st.session_state.get("uploaded_images", [])
     if uploaded_images:
         for i, uploaded_image in enumerate(uploaded_images):
-            # 새 페이지를 A4 사이즈로 추가
             page = doc.new_page(width=fitz.paper_size("a4")[0], height=fitz.paper_size("a4")[1])
             
-            # 페이지 상단에 제목 추가
             title_rect = fitz.Rect(50, 50, page.rect.width - 50, 80)
             if font_available:
                 page.insert_textbox(title_rect, f"첨부된 증빙 자료 {i+1}", 
@@ -299,14 +386,9 @@ def generate_filled_pdf():
                 page.insert_textbox(title_rect, f"첨부된 증빙 자료 {i+1}", 
                                   fontsize=14, align=fitz.TEXT_ALIGN_CENTER)
 
-            # 이미지 데이터를 바이트로 읽기
             img_bytes = uploaded_image.getvalue()
-
-            # 이미지를 삽입할 영역 계산 (여백 고려)
             margin = 50
             image_area = fitz.Rect(margin, 100, page.rect.width - margin, page.rect.height - margin)
-            
-            # 페이지에 이미지 삽입 (가로/세로 비율 유지하며 영역에 맞게)
             page.insert_image(image_area, stream=img_bytes, keep_proportion=True)
 
     pdf_buffer = BytesIO()
@@ -315,7 +397,7 @@ def generate_filled_pdf():
     pdf_buffer.seek(0)
     return pdf_buffer
 
-# ===== 시스템 프롬프트 (TMD_VARIABLES.md 기반) =====
+# ===== 시스템 프롬프트 =====
 SYSTEM_PROMPT = """당신은 턱관절 질환(TMD) 전문 의료 상담 AI입니다. 
 환자와 친절하고 전문적인 대화를 통해 DC/TMD 진단 기준에 따른 정보를 체계적으로 수집해야 합니다.
 
@@ -425,12 +507,10 @@ SYSTEM_PROMPT = """당신은 턱관절 질환(TMD) 전문 의료 상담 AI입니
 - sleep_tmd_relation: 수면↔턱관절 증상 연관성
 
 **대화 규칙:**
-1. 한 번에 1개의 관련된 질문만 하세요
+1. 한 번에 1-3개의 관련된 질문만 하세요
 2. 환자의 답변에 공감하고 이해를 표현하세요
 3. 의학 용어보다는 쉬운 말로 설명하세요
 4. 조건부 질문: 이전 답변에 따라 추가 질문을 하세요
-   - 예: "두통이 있으시다면..." → 두통 위치, 강도 등 추가 질문
-   - 예: "턱에서 소리가 난다면..." → 소리 종류, 발생 상황 등 추가 질문
 5. 리스트 형태 답변은 여러 개 선택 가능함을 알려주세요
 6. 0-10 척도 질문은 명확히 설명하세요 (0: 없음, 10: 극심함)
 7. 충분한 정보를 수집했다고 판단되면 "정보 수집이 완료되었습니다"라고 명확히 말하고 is_complete를 true로 설정하세요
@@ -463,7 +543,6 @@ def validate_api_key(api_key):
     """API 키 유효성 검증"""
     try:
         client = Anthropic(api_key=api_key)
-        # 간단한 테스트 호출
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=10,
@@ -473,11 +552,12 @@ def validate_api_key(api_key):
     except Exception as e:
         return False, str(e)
 
+@auto_save_decorator
 def call_claude(user_message):
-    """Claude API를 호출하여 응답 받기"""
+    """Claude API를 호출하여 응답 받기 (자동 저장 포함)"""
     try:
         if not st.session_state.anthropic_client:
-            return "⚠️ API 클라이언트가 초기화되지 않았습니다.", False
+            return "⚠️ API 클라이언트가 초기화되지 않았습니다.", False, ""
         
         # 대화 히스토리 구성
         conversation_history = []
@@ -488,7 +568,6 @@ def call_claude(user_message):
                     "content": msg["content"]
                 })
             elif msg["role"] == "assistant":
-                # assistant 메시지는 실제 표시된 내용만 포함
                 conversation_history.append({
                     "role": msg["role"],
                     "content": msg.get("display_content", msg["content"])
@@ -512,13 +591,11 @@ def call_claude(user_message):
         
         # JSON 파싱 시도
         try:
-            # JSON 코드 블록 제거 (```json ... ``` 형식)
             if "```json" in assistant_message:
                 assistant_message = assistant_message.split("```json")[1].split("```")[0].strip()
             elif "```" in assistant_message:
                 assistant_message = assistant_message.split("```")[1].split("```")[0].strip()
             
-            # JSON 응답 파싱
             parsed_response = json.loads(assistant_message)
             message = parsed_response.get("message", assistant_message)
             collected_data = parsed_response.get("collected_data", {})
@@ -533,11 +610,9 @@ def call_claude(user_message):
             if is_complete:
                 st.session_state.conversation_complete = True
             
-            # 실제 표시할 메시지만 반환
             return message, True, progress
             
         except json.JSONDecodeError as e:
-            # JSON 파싱 실패 시 원본 메시지 반환
             st.error(f"JSON 파싱 오류: {str(e)}")
             return assistant_message, False, ""
             
@@ -547,10 +622,8 @@ def call_claude(user_message):
 def generate_diagnosis_report(patient_data):
     """환자 데이터를 바탕으로 상세 진단 보고서 생성"""
     
-    # 진단 결과 계산
     diagnoses = compute_diagnoses_for_all_symptoms(patient_data)
     
-    # diagnosis_result를 patient_data에 저장
     if diagnoses:
         patient_data["diagnosis_result"] = ", ".join(diagnoses)
     else:
@@ -599,7 +672,7 @@ def generate_diagnosis_report(patient_data):
     
     return report, diagnoses
 
-# ========== 사이드바: API 키 입력 ==========
+# ========== 사이드바: API 키 입력 및 세션 관리 ==========
 with st.sidebar:
     st.header("🔐 API 설정")
     
@@ -612,7 +685,6 @@ with st.sidebar:
     except:
         secrets_api_key = None
     
-    # 사용 가능한 API 키 선택
     available_api_key = env_api_key or secrets_api_key
     
     if available_api_key and not st.session_state.api_key_validated:
@@ -625,7 +697,6 @@ with st.sidebar:
             else:
                 st.warning("⚠️ 저장된 API 키가 유효하지 않습니다.")
     
-    # API 키 수동 입력
     if not st.session_state.api_key_validated:
         st.info("💡 Anthropic API 키를 입력하세요")
         st.markdown("""
@@ -655,13 +726,30 @@ with st.sidebar:
                         st.error(f"❌ API 키가 유효하지 않습니다.\n\n오류: {result}")
             else:
                 st.warning("⚠️ API 키를 입력해주세요.")
-    
     else:
         st.success("✅ API 연결됨")
         if st.button("🔄 API 키 재설정"):
             st.session_state.api_key_validated = False
             st.session_state.anthropic_client = None
             st.rerun()
+    
+    st.markdown("---")
+    
+    # 세션 정보 표시
+    st.header("🔐 세션 정보")
+    st.caption(f"세션 ID: `{USER_ID[:8]}...`")
+    
+    # Firebase 연결 상태
+    if db:
+        st.success("✅ Firebase 연결됨")
+        
+        # 마지막 저장 시간 표시
+        saved_data = load_from_firestore()
+        if saved_data and 'updated_at' in saved_data:
+            last_saved = saved_data['updated_at']
+            st.caption(f"마지막 저장: {last_saved.strftime('%Y-%m-%d %H:%M:%S')}")
+    else:
+        st.error("❌ Firebase 연결 실패")
     
     st.markdown("---")
     
@@ -694,14 +782,39 @@ with st.sidebar:
         
         st.markdown("---")
         
-        if st.button("🔄 대화 초기화", use_container_width=True):
-            st.session_state.messages = []
-            st.session_state.patient_data = {}
-            st.session_state.conversation_complete = False
-            st.rerun()
+        # 세션 관리 버튼
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🔄 새로고침", use_container_width=True):
+                saved_data = load_from_firestore()
+                if saved_data:
+                    st.session_state.messages = saved_data.get('messages', [])
+                    st.session_state.patient_data = saved_data.get('patient_data', {})
+                    st.session_state.conversation_complete = saved_data.get('conversation_complete', False)
+                    st.success("✅ 저장된 데이터를 불러왔습니다!")
+                    st.rerun()
+                else:
+                    st.info("저장된 데이터가 없습니다.")
+        
+        with col2:
+            if st.button("🗑️ 초기화", use_container_width=True):
+                if delete_from_firestore():
+                    st.session_state.messages = []
+                    st.session_state.patient_data = {}
+                    st.session_state.conversation_complete = False
+                    st.success("✅ 대화가 초기화되었습니다!")
+                    st.rerun()
 
 # ========== 메인 화면 ==========
 st.title("🦷 턱관절 AI 대화형 문진 시스템")
+
+# Firebase 상태 표시
+if db:
+    st.success("🔄 세션이 자동으로 저장됩니다 (웹소켓 타임아웃 방지)")
+else:
+    st.error("⚠️ Firebase 연결 실패 - 데이터가 저장되지 않습니다")
+
 st.markdown("---")
 
 # API 키가 인증되지 않은 경우
@@ -719,6 +832,12 @@ if not st.session_state.api_key_validated:
     3. 다음 내용 입력:
     ```
     ANTHROPIC_API_KEY = "sk-ant-your-key"
+    cookie_password = "your-secure-password"
+    
+    [firebase]
+    type = "service_account"
+    project_id = "your-project-id"
+    ...
     ```
     """)
     st.stop()
@@ -729,6 +848,8 @@ if not st.session_state.messages:
 
 DC/TMD 진단 기준에 따라 체계적으로 증상을 확인하고, 예비 진단을 제공해드립니다.
 
+💾 **이 대화는 자동으로 저장됩니다** - 브라우저를 닫아도 언제든 이어서 진행할 수 있습니다!
+
 먼저 기본 정보부터 여쭤보겠습니다.
 **성함**이 어떻게 되시나요?"""
     
@@ -737,11 +858,11 @@ DC/TMD 진단 기준에 따라 체계적으로 증상을 확인하고, 예비 �
         "content": initial_message,
         "display_content": initial_message
     })
+    save_to_firestore()
 
 # 대화 히스토리 표시
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        # display_content가 있으면 그것을 사용, 없으면 content 사용
         display_text = message.get("display_content", message["content"])
         st.markdown(display_text)
 
@@ -758,13 +879,12 @@ if not st.session_state.conversation_complete:
         with st.chat_message("user"):
             st.markdown(prompt)
         
-        # Claude 응답 받기
+        # Claude 응답 받기 (자동 저장 포함)
         with st.chat_message("assistant"):
             with st.spinner("답변 생성 중..."):
                 response, is_json, progress = call_claude(prompt)
                 st.markdown(response)
                 
-                # 진행 상황 표시
                 if progress:
                     st.caption(f"📍 현재 단계: {progress}")
                 
@@ -782,7 +902,6 @@ else:
     # 진단 결과 생성 및 표시
     st.markdown("---")
     
-    # 진단 결과 표시
     with st.spinner("진단 생성 중..."):
         report, diagnoses = generate_diagnosis_report(st.session_state.patient_data)
         st.markdown(report)
@@ -806,7 +925,6 @@ else:
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        # PDF 다운로드 버튼
         if st.button("📥 진단 결과 PDF 다운로드", use_container_width=True):
             with st.spinner("PDF 생성 중..."):
                 pdf_buffer = generate_filled_pdf()
@@ -824,15 +942,15 @@ else:
     
     with col2:
         if st.button("🔄 새로운 문진 시작", use_container_width=True):
-            st.session_state.messages = []
-            st.session_state.patient_data = {}
-            st.session_state.conversation_complete = False
-            if 'uploaded_images' in st.session_state:
-                del st.session_state.uploaded_images
-            st.rerun()
+            if delete_from_firestore():
+                st.session_state.messages = []
+                st.session_state.patient_data = {}
+                st.session_state.conversation_complete = False
+                if 'uploaded_images' in st.session_state:
+                    del st.session_state.uploaded_images
+                st.rerun()
     
     with col3:
-        # 데이터 내보내기 버튼
         if st.button("📋 데이터 JSON 다운로드", use_container_width=True):
             json_data = json.dumps(st.session_state.patient_data, ensure_ascii=False, indent=2)
             st.download_button(
